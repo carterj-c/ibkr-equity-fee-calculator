@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>IBKR Fee Calculator Tool</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* Simple toggle switch styles */
+        .toggle-checkbox:checked {
+            right: 0;
+            border-color: #4A5568; /* bg-gray-700 */
+        }
+        .toggle-checkbox:checked + .toggle-label {
+            background-color: #4A5568; /* bg-gray-700 */
+        }
+    </style>
+    <script>
+        // Store heuristic constants
+        const HEURISTICS = {
+            FIXED: {
+                PER_SHARE: 0.005,
+                MIN_PER_ORDER: 1.00,
+                MAX_PER_ORDER_PCT: 0.01, // 1% of trade value
+            },
+            TIERED: {
+                COMMISSION: [
+                    { maxShares: 300000, rate: 0.0035 },
+                    { maxShares: 3000000, rate: 0.0020 },
+                    { maxShares: 20000000, rate: 0.0015 },
+                    { maxShares: 100000000, rate: 0.0010 },
+                    { maxShares: Infinity, rate: 0.0005 },
+                ],
+                MIN_PER_ORDER: 0.35,
+                MAX_PER_ORDER_PCT: 0.01, // 1% of trade value
+                CLEARING_FEE_PER_SHARE: 0.0002,
+                EXCHANGE_FEE_TAKER: 0.003, // Heuristic for a high-cost exchange like NASDAQ
+                EXCHANGE_REBATE_ADDER: -0.002, // Heuristic for an adder rebate
+            },
+            REGULATORY: {
+                SEC_FEE_PCT: 0.0000278, // $27.80 per $1,000,000 principle (sells only)
+                TAF_FEE_PER_SHARE: 0.000166, // (sells only)
+                TAF_FEE_MAX: 8.30, // (sells only)
+            }
+        };
+
+        // Helper function to format currency
+        function formatCurrency(num) {
+            return new Intl.NumberFormat('en-US', {
+                style: 'currency',
+                currency: 'USD',
+                minimumFractionDigits: 4,
+            }).format(num);
+        }
+
+        // Main calculation logic
+        function calculateFees() {
+            // Get inputs
+            const shares = parseFloat(document.getElementById('shares').value) || 0;
+            const price = parseFloat(document.getElementById('price').value) || 0;
+            const monthlyVolume = parseFloat(document.getElementById('monthlyVolume').value) || 0;
+            const isSell = document.getElementById('tradeType').value === 'sell';
+            const isTaker = document.getElementById('orderType').value === 'taker';
+
+            const tradeValue = shares * price;
+
+            // --- 1. FIXED PLAN CALCULATION ---
+            const fixed_commission = HEURISTICS.FIXED.PER_SHARE * shares;
+            const fixed_max = HEURISTICS.FIXED.MAX_PER_ORDER_PCT * tradeValue;
+            let fixed_total = Math.max(HEURISTICS.FIXED.MIN_PER_ORDER, fixed_commission);
+            fixed_total = Math.min(fixed_total, fixed_max);
+            
+            // Add regulatory fees (sells only)
+            let fixed_reg_fees = 0;
+            if (isSell) {
+                const secFee = HEURISTICS.REGULATORY.SEC_FEE_PCT * tradeValue;
+                const tafFee = Math.min(HEURISTICS.REGULATORY.TAF_FEE_PER_SHARE * shares, HEURISTICS.REGULATORY.TAF_FEE_MAX);
+                fixed_reg_fees = secFee + tafFee;
+                fixed_total += fixed_reg_fees;
+            }
+
+            // --- 2. TIERED PLAN CALCULATION ---
+            
+            // a) Find IBKR Commission Rate
+            const tier = HEURISTICS.TIERED.COMMISSION.find(t => monthlyVolume <= t.maxShares);
+            const tiered_rate = tier.rate;
+            
+            // b) IBKR Commission
+            const tiered_commission_base = tiered_rate * shares;
+            const tiered_max = HEURISTICS.TIERED.MAX_PER_ORDER_PCT * tradeValue;
+            let tiered_commission = Math.max(HEURISTICS.TIERED.MIN_PER_ORDER, tiered_commission_base);
+            tiered_commission = Math.min(tiered_commission, tiered_max);
+
+            // c) Clearing Fee
+            const clearing_fee = HEURISTICS.TIERED.CLEARING_FEE_PER_SHARE * shares;
+
+            // d) Exchange Fee/Rebate
+            const exchange_fee = isTaker 
+                ? HEURISTICS.TIERED.EXCHANGE_FEE_TAKER * shares 
+                : HEURISTICS.TIERED.EXCHANGE_REBATE_ADDER * shares;
+
+            // e) Regulatory Fees
+            let tiered_reg_fees = 0;
+            if (isSell) {
+                const secFee = HEURISTICS.REGULATORY.SEC_FEE_PCT * tradeValue;
+                const tafFee = Math.min(HEURISTICS.REGULATORY.TAF_FEE_PER_SHARE * shares, HEURISTICS.REGULATORY.TAF_FEE_MAX);
+                tiered_reg_fees = secFee + tafFee;
+            }
+
+            // f) Total Tiered Cost
+            const tiered_total = tiered_commission + clearing_fee + exchange_fee + tiered_reg_fees;
+
+            // --- 3. DISPLAY RESULTS ---
+            
+            // Fixed Results
+            document.getElementById('fixed_total').textContent = formatCurrency(fixed_total);
+            document.getElementById('fixed_per_share').textContent = `${formatCurrency(fixed_total / shares)} / share`;
+            document.getElementById('fixed_breakdown').innerHTML = `
+                <li>Commission: ${formatCurrency(fixed_total - fixed_reg_fees)}</li>
+                <li class="text-xs ${isSell ? 'text-gray-600' : 'text-gray-400'}">(Reg. Fees: ${formatCurrency(fixed_reg_fees)})</li>
+            `;
+
+            // Tiered Results
+            document.getElementById('tiered_total').textContent = formatCurrency(tiered_total);
+            document.getElementById('tiered_per_share').textContent = `${formatCurrency(tiered_total / shares)} / share`;
+            document.getElementById('tiered_breakdown').innerHTML = `
+                <li>IBKR Commission: ${formatCurrency(tiered_commission)}</li>
+                <li>Clearing Fee: ${formatCurrency(clearing_fee)}</li>
+                <li class="${exchange_fee > 0 ? 'text-red-600' : 'text-green-600'}">Exchange Fee/Rebate: ${formatCurrency(exchange_fee)}</li>
+                <li class="text-xs ${isSell ? 'text-gray-600' : 'text-gray-400'}">(Reg. Fees: ${formatCurrency(tiered_reg_fees)})</li>
+            `;
+            
+            // Highlight winner
+            const fixedCard = document.getElementById('fixed_card');
+            const tieredCard = document.getElementById('tiered_card');
+            fixedCard.classList.remove('border-green-500', 'border-red-500', 'border-4');
+            tieredCard.classList.remove('border-green-500', 'border-red-500', 'border-4');
+
+            if (fixed_total < tiered_total) {
+                fixedCard.classList.add('border-green-500', 'border-4');
+                tieredCard.classList.add('border-red-500', 'border-4');
+            } else {
+                tieredCard.classList.add('border-green-500', 'border-4');
+                fixedCard.classList.add('border-red-500', 'border-4');
+            }
+        }
+        
+        // Run calculation on load
+        window.onload = () => {
+             // Set default values for a clear example
+            document.getElementById('shares').value = 10;
+            document.getElementById('price').value = 450;
+            document.getElementById('monthlyVolume').value = 10000;
+            
+            calculateFees();
+            
+            // Add event listeners
+            const inputs = document.querySelectorAll('#calculator input, #calculator select');
+            inputs.forEach(input => {
+                input.addEventListener('input', calculateFees);
+            });
+        };
+
+    </script>
+</head>
+<body class="bg-gray-900 text-gray-100 font-sans p-4 md:p-8">
+    <div class="max-w-7xl mx-auto">
+        
+        <header class="text-center mb-10">
+            <h1 class="text-4xl font-bold text-white mb-2">IBKR Fee Heuristic Calculator</h1>
+            <p class="text-lg text-gray-400">Fixed vs. Tiered Pricing for US Stocks & ETFs (IBKR Pro)</p>
+        </header>
+
+        <!-- Interactive Calculator -->
+        <section id="calculator" class="mb-12">
+            <div class="bg-gray-800 p-6 rounded-2xl shadow-xl border border-gray-700">
+                <h2 class="text-2xl font-semibold mb-6 text-center">Simulate Your Trade</h2>
+                <div class="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-5 gap-6">
+                    <!-- Inputs -->
+                    <div>
+                        <label for="shares" class="block text-sm font-medium text-gray-300 mb-1">Number of Shares</label>
+                        <input type="number" id="shares" class="w-full bg-gray-700 border border-gray-600 rounded-lg p-3 text-white focus:ring-2 focus:ring-blue-500 focus:outline-none" value="100">
+                    </div>
+                    <div>
+                        <label for="price" class="block text-sm font-medium text-gray-300 mb-1">Share Price (USD)</label>
+                        <input type="number" id="price" class="w-full bg-gray-700 border border-gray-600 rounded-lg p-3 text-white focus:ring-2 focus:ring-blue-500 focus:outline-none" value="50">
+                    </div>
+                    <div>
+                        <label for="monthlyVolume" class="block text-sm font-medium text-gray-300 mb-1">Monthly Volume (Shares)</label>
+                        <input type="number" id="monthlyVolume" class="w-full bg-gray-700 border border-gray-600 rounded-lg p-3 text-white focus:ring-2 focus:ring-blue-500 focus:outline-none" value="10000">
+                    </div>
+                    <div>
+                        <label for="tradeType" class="block text-sm font-medium text-gray-300 mb-1">Trade Type</label>
+                        <select id="tradeType" class="w-full bg-gray-700 border border-gray-600 rounded-lg p-3 text-white focus:ring-2 focus:ring-blue-500 focus:outline-none appearance-none">
+                            <option value="buy">Buy</option>
+                            <option value="sell">Sell</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label for="orderType" class="block text-sm font-medium text-gray-300 mb-1">Order Type (Liquidity)</label>
+                        <select id="orderType" class="w-full bg-gray-700 border border-gray-600 rounded-lg p-3 text-white focus:ring-2 focus:ring-blue-500 focus:outline-none appearance-none">
+                            <option value="taker">Taker (e.g., Market)</option>
+                            <option value="adder">Adder (e.g., Limit)</option>
+                        </select>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Results -->
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-8 mt-8">
+                <!-- Fixed Plan Card -->
+                <div id="fixed_card" class="bg-gray-800 p-6 rounded-2xl shadow-lg border border-gray-700 transition-all duration-300">
+                    <h3 class="text-2xl font-semibold mb-4 text-blue-400">Fixed Plan</h3>
+                    <div class="mb-4">
+                        <p class="text-sm text-gray-400">Total Cost</p>
+                        <p id="fixed_total" class="text-4xl font-bold text-white">$0.0000</p>
+                        <p id="fixed_per_share" class="text-lg text-gray-300">$0.0000 / share</p>
+                    </div>
+                    <hr class="border-gray-700 my-4">
+                    <h4 class="text-lg font-semibold mb-2">Heuristic Breakdown</h4>
+                    <ul id="fixed_breakdown" class="text-gray-300 space-y-1 list-disc list-inside">
+                        <li>Commission: $0.0000</li>
+                        <li class="text-xs text-gray-400">(Reg. Fees: $0.0000)</li>
+                    </ul>
+                </div>
+                <!-- Tiered Plan Card -->
+                <div id="tiered_card" class="bg-gray-800 p-6 rounded-2xl shadow-lg border border-gray-700 transition-all duration-300">
+                    <h3 class="text-2xl font-semibold mb-4 text-purple-400">Tiered Plan</h3>
+                    <div class="mb-4">
+                        <p class="text-sm text-gray-400">Total Cost</p>
+                        <p id="tiered_total" class="text-4xl font-bold text-white">$0.0000</p>
+                        <p id="tiered_per_share" class="text-lg text-gray-300">$0.0000 / share</p>
+                    </div>
+                    <hr class="border-gray-700 my-4">
+                    <h4 class="text-lg font-semibold mb-2">Heuristic Breakdown</h4>
+                    <ul id="tiered_breakdown" class="text-gray-300 space-y-1 list-disc list-inside">
+                        <li>IBKR Commission: $0.0000</li>
+                        <li>Clearing Fee: $0.0000</li>
+                        <li class="text-red-600">Exchange Fee: $0.0000</li>
+                        <li class="text-xs text-gray-400">(Reg. Fees: $0.0000)</li>
+                    </ul>
+                </div>
+            </div>
+        </section>
+
+    </div>
+</body>
+</html>
